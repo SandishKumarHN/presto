@@ -13,7 +13,9 @@
  */
 package com.facebook.presto.cassandra;
 
+import com.datastax.driver.core.LocalDate;
 import com.datastax.driver.core.PreparedStatement;
+import com.datastax.driver.core.ProtocolVersion;
 import com.datastax.driver.core.querybuilder.Insert;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.block.Block;
@@ -22,17 +24,17 @@ import com.facebook.presto.spi.ConnectorPageSink;
 import com.facebook.presto.spi.PrestoException;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
+import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
 
 import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import static com.datastax.driver.core.querybuilder.QueryBuilder.bindMarker;
 import static com.datastax.driver.core.querybuilder.QueryBuilder.insertInto;
@@ -55,15 +57,17 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 public class CassandraPageSink
         implements ConnectorPageSink
 {
-    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE.withZone(ZoneId.of("UTC"));
+    private static final DateTimeFormatter DATE_FORMATTER = ISODateTimeFormat.date().withZoneUTC();
 
     private final CassandraSession cassandraSession;
     private final PreparedStatement insert;
     private final List<Type> columnTypes;
     private final boolean generateUUID;
+    private final Function<Long, Object> toCassandraDate;
 
     public CassandraPageSink(
             CassandraSession cassandraSession,
+            ProtocolVersion protocolVersion,
             String schemaName,
             String tableName,
             List<String> columnNames,
@@ -76,6 +80,14 @@ public class CassandraPageSink
         requireNonNull(columnNames, "columnNames is null");
         this.columnTypes = ImmutableList.copyOf(requireNonNull(columnTypes, "columnTypes is null"));
         this.generateUUID = generateUUID;
+
+        if (protocolVersion.toInt() <= ProtocolVersion.V3.toInt()) {
+            this.toCassandraDate = value -> DATE_FORMATTER.print(TimeUnit.DAYS.toMillis(value));
+        }
+        else {
+            this.toCassandraDate = value -> LocalDate.fromDaysSinceEpoch(toIntExact(value));
+        }
+
 
         Insert insert = insertInto(schemaName, tableName);
         if (generateUUID) {
@@ -130,7 +142,7 @@ public class CassandraPageSink
             values.add(intBitsToFloat(toIntExact(type.getLong(block, position))));
         }
         else if (DATE.equals(type)) {
-            values.add(DATE_FORMATTER.format(Instant.ofEpochMilli(TimeUnit.DAYS.toMillis(type.getLong(block, position)))));
+            values.add(toCassandraDate.apply(type.getLong(block, position)));
         }
         else if (TIMESTAMP.equals(type)) {
             values.add(new Timestamp(type.getLong(block, position)));
